@@ -1,0 +1,1055 @@
+import { useEffect, useState } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { supabase } from '@/lib/supabase'
+import { Project, Task, TaskPriority, TaskStatus } from '@/types/project'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { Label } from '@/components/ui/label'
+import { toast } from 'sonner'
+import {
+  ArrowLeft,
+  Edit,
+  Trash2,
+  Plus,
+  Calendar,
+  MapPin,
+  Users,
+  Clock,
+  Upload,
+  FileText,
+} from 'lucide-react'
+import { formatCurrency, formatDate } from '@/lib/utils'
+import { ProjectDocument } from '@/types/project'
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ProjectStatus =
+  | 'planning'
+  | 'active'
+  | 'completed'
+  | 'archived'
+  | 'cancelled'
+
+const PROJECT_STATUS: Array<{
+  value: ProjectStatus
+  label: string
+  color: string
+}> = [
+  { value: 'planning',  label: 'In Planning', color: 'bg-blue-500'   },
+  { value: 'active',    label: 'Attivo',       color: 'bg-green-500'  },
+  { value: 'completed', label: 'Completato',   color: 'bg-purple-500' },
+  { value: 'archived',  label: 'Archiviato',   color: 'bg-gray-500'   },
+  { value: 'cancelled', label: 'Cancellato',   color: 'bg-red-500'    },
+]
+
+const TASK_PRIORITIES: Array<{
+  value: TaskPriority
+  label: string
+  color: string
+}> = [
+  { value: 'low',    label: 'Bassa', color: 'text-gray-500'  },
+  { value: 'medium', label: 'Media', color: 'text-yellow-500' },
+  { value: 'high',   label: 'Alta',  color: 'text-red-500'   },
+]
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function ProjectDetail() {
+  const { id }     = useParams<{ id: string }>()
+  const navigate   = useNavigate()
+  // cast necessario finché i tipi generati di Supabase non sono aggiornati
+  const supabaseClient = supabase as any
+
+  const [project,            setProject]            = useState<Project | null>(null)
+  const [tasks,              setTasks]              = useState<Task[]>([])
+  const [loading,            setLoading]            = useState(true)
+  const [isTaskModalOpen,    setIsTaskModalOpen]    = useState(false)
+  const [editingTask,        setEditingTask]        = useState<Task | null>(null)
+
+  const [documents,          setDocuments]          = useState<ProjectDocument[]>([])
+  const [uploadingDocument,  setUploadingDocument]  = useState(false)
+  const [isDocumentModalOpen,setIsDocumentModalOpen]= useState(false)
+  const [documentDescription,setDocumentDescription]= useState('')
+
+  const [newTask, setNewTask] = useState<Partial<Task>>({
+    title:       '',
+    description: '',
+    priority:    'medium',
+    status:      'todo',
+    due_date:    '',
+  })
+
+  // ── Mount ─────────────────────────────────────────────
+  useEffect(() => {
+    if (id) {
+      loadProject()
+      loadTasks()
+      loadDocuments()
+    }
+  }, [id])
+
+  // ── Loaders ───────────────────────────────────────────
+  const loadProject = async () => {
+    try {
+      const { data, error } = await supabaseClient
+        .from('projects')
+        .select(`
+          *,
+          venue:venues(*),
+          project_artists(
+            artist:artists(*)
+          )
+        `)
+        .eq('id', id)
+        .single()
+
+      if (error) throw error
+      setProject(data as Project)
+    } catch (error: any) {
+      console.error('Error loading project:', error)
+      toast.error('Errore nel caricamento del progetto')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadTasks = async () => {
+    try {
+      const { data, error } = await supabaseClient
+        .from('tasks')
+        .select('*')
+        .eq('project_id', id)
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      setTasks(data as Task[])
+    } catch (error: any) {
+      console.error('Error loading tasks:', error)
+    }
+  }
+
+  const loadDocuments = async () => {
+    if (!id) return
+    try {
+      const { data, error } = await supabaseClient
+        .from('project_documents')
+        .select('*')
+        .eq('project_id', id)
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      setDocuments(data || [])
+    } catch (error: any) {
+      console.error('Error loading documents:', error)
+    }
+  }
+
+  // ── Handlers ──────────────────────────────────────────
+  const handleStatusChange = async (newStatus: ProjectStatus) => {
+    if (!project?.id) return
+    try {
+      const { error } = await supabaseClient
+        .from('projects')
+        .update({ status: newStatus })
+        .eq('id', project.id)
+
+      if (error) throw error
+      setProject({ ...project, status: newStatus })
+      toast.success('Status aggiornato con successo')
+    } catch (error: any) {
+      console.error('Error updating status:', error)
+      toast.error("Errore nell'aggiornamento dello status")
+    }
+  }
+
+  const handleCreateTask = async () => {
+    if (!project?.id || !newTask.title?.trim()) {
+      toast.error('Il titolo del task è obbligatorio')
+      return
+    }
+
+    try {
+      const { data: { user } } = await supabaseClient.auth.getUser()
+      if (!user) throw new Error('User not authenticated')
+
+      if (editingTask?.id) {
+        // UPDATE
+        const { error } = await supabaseClient
+          .from('tasks')
+          .update({
+            title:       newTask.title.trim(),
+            description: newTask.description?.trim() || null,
+            priority:    newTask.priority || 'medium',
+            status:      newTask.status   || 'todo',
+            due_date:    newTask.due_date  || null,
+          })
+          .eq('id', editingTask.id)
+
+        if (error) throw error
+        toast.success('Task aggiornato con successo')
+      } else {
+        // INSERT
+        // @ts-ignore
+        const { error } = await supabaseClient
+          .from('tasks')
+          .insert({
+            project_id:  project.id,
+            title:       newTask.title.trim(),
+            description: newTask.description?.trim() || null,
+            priority:    newTask.priority || 'medium',
+            status:      newTask.status   || 'todo',
+            due_date:    newTask.due_date  || null,
+            assigned_to: null,
+            created_by:  user.id,
+          })
+          .select()
+
+        if (error) throw error
+        toast.success('Task creato con successo')
+      }
+
+      // Reset
+      setIsTaskModalOpen(false)
+      setEditingTask(null)
+      setNewTask({
+        title: '', description: '',
+        priority: 'medium', status: 'todo', due_date: '',
+      })
+      await loadTasks()
+    } catch (error: any) {
+      console.error('Save task error:', error)
+      toast.error(error.message || 'Errore nel salvataggio del task')
+    }
+  }
+
+  const handleTaskStatusChange = async (
+    taskId: string,
+    newStatus: TaskStatus
+  ) => {
+    try {
+      const { error } = await supabaseClient
+        .from('tasks')
+        .update({ status: newStatus })
+        .eq('id', taskId)
+
+      if (error) throw error
+      setTasks(tasks.map(t => t.id === taskId ? { ...t, status: newStatus } : t))
+      toast.success('Status task aggiornato')
+    } catch (error: any) {
+      console.error('Error updating task status:', error)
+      toast.error("Errore nell'aggiornamento")
+    }
+  }
+
+  const handleDeleteTask = async (taskId: string) => {
+    if (!confirm('Sei sicuro di voler eliminare questo task?')) return
+    try {
+      const { error } = await supabaseClient
+        .from('tasks')
+        .delete()
+        .eq('id', taskId)
+
+      if (error) throw error
+      setTasks(tasks.filter(t => t.id !== taskId))
+      toast.success('Task eliminato')
+    } catch (error: any) {
+      console.error('Error deleting task:', error)
+      toast.error("Errore nell'eliminazione del task")
+    }
+  }
+
+  const handleDeleteProject = async () => {
+    if (!project?.id) return
+    if (!confirm(
+      'Sei sicuro di voler eliminare questo progetto? Questa azione è irreversibile.'
+    )) return
+
+    try {
+      const { error } = await supabaseClient
+        .from('projects')
+        .delete()
+        .eq('id', project.id)
+
+      if (error) throw error
+      toast.success('Progetto eliminato con successo')
+      // ✅ CORRETTO: prefisso /app/
+      navigate('/app/projects')
+    } catch (error: any) {
+      console.error('Error deleting project:', error)
+      toast.error("Errore nell'eliminazione del progetto")
+    }
+  }
+
+  const handleDocumentUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const files = Array.from(e.target.files || [])
+    if (files.length === 0 || !project) return
+
+    setUploadingDocument(true)
+    try {
+      const { data: { user } } = await supabaseClient.auth.getUser()
+      if (!user) throw new Error('User not authenticated')
+
+      for (const file of files) {
+        const maxSize = 50 * 1024 * 1024
+        if (file.size > maxSize) {
+          toast.error(`${file.name} supera i 50MB`)
+          continue
+        }
+
+        const fileExt  = file.name.split('.').pop()
+        const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`
+        const filePath = `${user.id}/${project.id}/${fileName}`
+
+        const { error: uploadError } = await supabaseClient.storage
+          .from('project-documents')
+          .upload(filePath, file, { cacheControl: '3600', upsert: false })
+
+        if (uploadError) throw uploadError
+
+        const { data: { publicUrl } } = supabaseClient.storage
+          .from('project-documents')
+          .getPublicUrl(filePath)
+
+        // @ts-ignore
+        const { error: dbError } = await supabaseClient
+          .from('project_documents')
+          .insert({
+            project_id:  project.id,
+            file_name:   file.name,
+            file_url:    publicUrl,
+            file_type:   file.type,
+            file_size:   file.size,
+            description: documentDescription || null,
+            uploaded_by: user.id,
+          })
+
+        if (dbError) throw dbError
+      }
+
+      toast.success(`${files.length} documento/i caricato/i con successo`)
+      setDocumentDescription('')
+      setIsDocumentModalOpen(false)
+      loadDocuments()
+    } catch (error: any) {
+      console.error('Error uploading document:', error)
+      toast.error(error.message || 'Errore nel caricamento del documento')
+    } finally {
+      setUploadingDocument(false)
+    }
+  }
+
+  const handleDeleteDocument = async (
+    documentId: string,
+    fileUrl: string
+  ) => {
+    if (!confirm('Sei sicuro di voler eliminare questo documento?')) return
+    try {
+      const { error: dbError } = await supabaseClient
+        .from('project_documents')
+        .delete()
+        .eq('id', documentId)
+
+      if (dbError) throw dbError
+
+      // Tenta eliminazione da Storage (non bloccante)
+      const filePath = fileUrl.split('/app').slice(-3).join('/app')
+      const { error: storageError } = await supabaseClient.storage
+        .from('project-documents')
+        .remove([filePath])
+      if (storageError) console.warn('Storage delete error:', storageError)
+
+      toast.success('Documento eliminato')
+      loadDocuments()
+    } catch (error: any) {
+      console.error('Error deleting document:', error)
+      toast.error("Errore nell'eliminazione del documento")
+    }
+  }
+
+  // ── Helpers ───────────────────────────────────────────
+  const formatFileSize = (bytes: number | null): string => {
+    if (!bytes) return 'N/D'
+    if (bytes < 1024)           return bytes + ' B'
+    if (bytes < 1024 * 1024)    return (bytes / 1024).toFixed(1) + ' KB'
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  }
+
+  const getFileIcon = (fileType: string | null) => {
+    if (!fileType) return <FileText className="h-8 w-8 text-gray-400" />
+    if (fileType.includes('pdf'))                               return <FileText className="h-8 w-8 text-red-500"    />
+    if (fileType.includes('word') || fileType.includes('document')) return <FileText className="h-8 w-8 text-blue-500"   />
+    if (fileType.includes('excel') || fileType.includes('spreadsheet')) return <FileText className="h-8 w-8 text-green-500"  />
+    if (fileType.includes('image'))                             return <FileText className="h-8 w-8 text-purple-500" />
+    return <FileText className="h-8 w-8 text-gray-400" />
+  }
+
+  const openEditTaskModal = (task: Task) => {
+    setEditingTask(task)
+    setNewTask({
+      title:       task.title,
+      description: task.description || '',
+      priority:    task.priority,
+      status:      task.status,
+      due_date:    task.due_date || '',
+    })
+    setIsTaskModalOpen(true)
+  }
+
+  const getTasksByStatus = (status: TaskStatus) =>
+    tasks.filter(t => t.status === status)
+
+  const calculateProgress = () => {
+    if (tasks.length === 0) return 0
+    const done = tasks.filter(t => t.status === 'done').length
+    return Math.round((done / tasks.length) * 100)
+  }
+
+  // ── Guards ────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary" />
+      </div>
+    )
+  }
+
+  if (!project) {
+    return (
+      <div className="container mx-auto p-6">
+        <Card className="p-6 text-center">
+          <p className="text-gray-500">Progetto non trovato</p>
+          {/* ✅ CORRETTO: prefisso /app/ */}
+          <Button onClick={() => navigate('/app/projects')} className="mt-4">
+            Torna ai progetti
+          </Button>
+        </Card>
+      </div>
+    )
+  }
+
+  // ── Render ────────────────────────────────────────────
+  return (
+    <div className="container mx-auto p-6 space-y-6">
+
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          {/* ✅ CORRETTO: prefisso /app/ */}
+          <Button variant="ghost" onClick={() => navigate('/app/projects')}>
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Indietro
+          </Button>
+          <div>
+            <h1 className="text-3xl font-bold">{project.project_name}</h1>
+            <p className="text-gray-500">{project.project_type}</p>
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <select
+            value={project.status}
+            onChange={(e) => handleStatusChange(e.target.value as ProjectStatus)}
+            className="flex h-10 items-center justify-between rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm"
+          >
+            {PROJECT_STATUS.map((s) => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </select>
+
+          {/* ✅ CORRETTO: prefisso /app/ */}
+          <Button
+            variant="outline"
+            onClick={() => navigate(`/app/projects/${project.id}/edit`)}
+          >
+            <Edit className="h-4 w-4 mr-2" />
+            Modifica
+          </Button>
+
+          <Button variant="destructive" onClick={handleDeleteProject}>
+            <Trash2 className="h-4 w-4 mr-2" />
+            Elimina
+          </Button>
+        </div>
+      </div>
+
+      {/* ── Quick Info ── */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card className="p-4">
+          <div className="flex items-center gap-3">
+            <Calendar className="h-5 w-5 text-gray-400" />
+            <div>
+              <p className="text-sm text-gray-500">Data Inizio</p>
+              <p className="font-semibold">
+                {project.start_date ? formatDate(project.start_date) : 'N/D'}
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-4">
+          <div className="flex items-center gap-3">
+            <Calendar className="h-5 w-5 text-gray-400" />
+            <div>
+              <p className="text-sm text-gray-500">Data Fine</p>
+              <p className="font-semibold">
+                {project.end_date ? formatDate(project.end_date) : 'N/D'}
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-4">
+          <div className="flex items-center gap-3">
+            <MapPin className="h-5 w-5 text-gray-400" />
+            <div>
+              <p className="text-sm text-gray-500">Venue</p>
+              <p className="font-semibold">
+                {project.venue?.venue_name || 'TBD'}
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-4">
+          <div className="flex items-center gap-3">
+            <Users className="h-5 w-5 text-gray-400" />
+            <div>
+              <p className="text-sm text-gray-500">Artisti</p>
+              <p className="font-semibold">
+                {project.project_artists?.length || 0}
+              </p>
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      {/* ── Tabs ── */}
+      <Tabs defaultValue="overview" className="w-full">
+        <TabsList className="grid w-full grid-cols-5">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="tasks">Tasks ({tasks.length})</TabsTrigger>
+          <TabsTrigger value="team">Team</TabsTrigger>
+          <TabsTrigger value="documents">Documenti</TabsTrigger>
+          <TabsTrigger value="budget">Budget</TabsTrigger>
+        </TabsList>
+
+        {/* ════ Tab: Overview ════ */}
+        <TabsContent value="overview" className="space-y-4">
+          <Card className="p-6">
+            <h3 className="text-lg font-semibold mb-2">Descrizione</h3>
+            <p className="text-gray-700 whitespace-pre-wrap">
+              {project.description || 'Nessuna descrizione disponibile'}
+            </p>
+          </Card>
+
+          <Card className="p-6">
+            <h3 className="text-lg font-semibold mb-4">Budget</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <p className="text-sm text-gray-500">Budget Pianificato</p>
+                <p className="text-2xl font-bold text-blue-600">
+                  {formatCurrency(project.budget_planned || 0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-500">Budget Attuale</p>
+                <p className="text-2xl font-bold text-green-600">
+                  {formatCurrency(project.budget_actual || 0)}
+                </p>
+              </div>
+            </div>
+            {project.budget_planned && (
+              <div className="mt-4">
+                <div className="flex justify-between text-sm mb-1">
+                  <span>Utilizzo Budget</span>
+                  <span>
+                    {Math.round(
+                      ((project.budget_actual || 0) / project.budget_planned) * 100
+                    )}%
+                  </span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-600 h-2 rounded-full transition-all"
+                    style={{
+                      width: `${Math.min(
+                        ((project.budget_actual || 0) / project.budget_planned) * 100,
+                        100
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-6">
+            <h3 className="text-lg font-semibold mb-4">Progresso Tasks</h3>
+            <div className="space-y-2">
+              <div className="flex justify-between text-sm">
+                <span>Completamento</span>
+                <span className="font-semibold">{calculateProgress()}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-3">
+                <div
+                  className="bg-green-600 h-3 rounded-full transition-all"
+                  style={{ width: `${calculateProgress()}%` }}
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-4 text-sm">
+                <div className="text-center">
+                  <p className="text-gray-500">To Do</p>
+                  <p className="font-bold text-lg">{getTasksByStatus('todo').length}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-gray-500">In Progress</p>
+                  <p className="font-bold text-lg">{getTasksByStatus('in_progress').length}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-gray-500">Done</p>
+                  <p className="font-bold text-lg">{getTasksByStatus('done').length}</p>
+                </div>
+              </div>
+            </div>
+          </Card>
+        </TabsContent>
+
+        {/* ════ Tab: Tasks ════ */}
+        <TabsContent value="tasks" className="space-y-4">
+          <div className="flex justify-between items-center">
+            <h3 className="text-lg font-semibold">Gestione Tasks</h3>
+
+            <Dialog open={isTaskModalOpen} onOpenChange={setIsTaskModalOpen}>
+              <DialogTrigger asChild>
+                <Button
+                  onClick={() => {
+                    setEditingTask(null)
+                    setNewTask({
+                      title: '', description: '',
+                      priority: 'medium', status: 'todo', due_date: '',
+                    })
+                  }}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Nuovo Task
+                </Button>
+              </DialogTrigger>
+
+              <DialogContent className="max-w-md">
+                <DialogHeader>
+                  <DialogTitle>
+                    {editingTask ? 'Modifica Task' : 'Nuovo Task'}
+                  </DialogTitle>
+                </DialogHeader>
+
+                <form onSubmit={(e) => { e.preventDefault(); handleCreateTask() }}>
+                  <div className="space-y-4">
+                    <div>
+                      <Label htmlFor="task-title">Titolo *</Label>
+                      <Input
+                        id="task-title"
+                        value={newTask.title || ''}
+                        onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
+                        placeholder="Titolo del task"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="task-description">Descrizione</Label>
+                      <Textarea
+                        id="task-description"
+                        value={newTask.description || ''}
+                        onChange={(e) =>
+                          setNewTask({ ...newTask, description: e.target.value })
+                        }
+                        placeholder="Descrizione dettagliata"
+                        rows={3}
+                      />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="task-priority">Priorità</Label>
+                      <select
+                        id="task-priority"
+                        value={newTask.priority || 'medium'}
+                        onChange={(e) =>
+                          setNewTask({ ...newTask, priority: e.target.value as TaskPriority })
+                        }
+                        className="flex h-10 w-full items-center justify-between rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm"
+                      >
+                        {TASK_PRIORITIES.map((p) => (
+                          <option key={p.value} value={p.value}>{p.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="task-status">Status</Label>
+                      <select
+                        id="task-status"
+                        value={newTask.status || 'todo'}
+                        onChange={(e) =>
+                          setNewTask({ ...newTask, status: e.target.value as TaskStatus })
+                        }
+                        className="flex h-10 w-full items-center justify-between rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm"
+                      >
+                        <option value="todo">To Do</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="done">Done</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="task-due-date">Scadenza</Label>
+                      <Input
+                        id="task-due-date"
+                        type="date"
+                        value={newTask.due_date || ''}
+                        onChange={(e) =>
+                          setNewTask({ ...newTask, due_date: e.target.value })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex gap-2 justify-end pt-4">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          setIsTaskModalOpen(false)
+                          setEditingTask(null)
+                        }}
+                      >
+                        Annulla
+                      </Button>
+                      <Button
+                        type="submit"
+                        disabled={!newTask.title?.trim()}
+                      >
+                        {editingTask ? 'Aggiorna' : 'Crea'}
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </div>
+
+          {/* Kanban Board */}
+          <div className="grid grid-cols-3 gap-4">
+            {(['todo', 'in_progress', 'done'] as TaskStatus[]).map((status) => {
+              const statusTasks = getTasksByStatus(status)
+              const statusLabels: Record<TaskStatus, string> = {
+                todo:        'To Do',
+                in_progress: 'In Progress',
+                done:        'Done',
+              }
+
+              return (
+                <Card key={status} className="p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="font-semibold">{statusLabels[status]}</h4>
+                    <Badge variant="secondary">{statusTasks.length}</Badge>
+                  </div>
+
+                  <div className="space-y-2">
+                    {statusTasks.map((task) => {
+                      const priority = TASK_PRIORITIES.find(p => p.value === task.priority)
+                      return (
+                        <Card
+                          key={task.id}
+                          className="p-3 cursor-pointer hover:shadow-md transition-shadow"
+                        >
+                          <div className="flex items-start justify-between mb-2">
+                            <h5 className="font-medium text-sm">{task.title}</h5>
+                            <div className="flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => openEditTaskModal(task)}
+                              >
+                                <Edit className="h-3 w-3" />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => handleDeleteTask(task.id)}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+
+                          {task.description && (
+                            <p className="text-xs text-gray-500 mb-2 line-clamp-2">
+                              {task.description}
+                            </p>
+                          )}
+
+                          <div className="flex items-center justify-between text-xs">
+                            <span className={`font-medium ${priority?.color}`}>
+                              {priority?.label}
+                            </span>
+                            {task.due_date && (
+                              <span className="text-gray-400 flex items-center gap-1">
+                                <Clock className="h-3 w-3" />
+                                {formatDate(task.due_date)}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-2 flex gap-1">
+                            {status !== 'todo' && (
+                              <Button
+                                size="sm" variant="outline" className="w-full text-xs"
+                                onClick={() => handleTaskStatusChange(task.id, 'todo')}
+                              >To Do</Button>
+                            )}
+                            {status !== 'in_progress' && (
+                              <Button
+                                size="sm" variant="outline" className="w-full text-xs"
+                                onClick={() => handleTaskStatusChange(task.id, 'in_progress')}
+                              >In Progress</Button>
+                            )}
+                            {status !== 'done' && (
+                              <Button
+                                size="sm" variant="outline" className="w-full text-xs"
+                                onClick={() => handleTaskStatusChange(task.id, 'done')}
+                              >Done</Button>
+                            )}
+                          </div>
+                        </Card>
+                      )
+                    })}
+                  </div>
+                </Card>
+              )
+            })}
+          </div>
+        </TabsContent>
+
+        {/* ════ Tab: Team ════ */}
+        <TabsContent value="team">
+          <Card className="p-6">
+            <h3 className="text-lg font-semibold mb-4">Artisti Partecipanti</h3>
+            {project.project_artists && project.project_artists.length > 0 ? (
+              <div className="grid gap-4">
+                {project.project_artists.map((pa: any) => (
+                  <div
+                    key={pa.artist.id}
+                    className="flex items-center gap-4 p-4 border rounded-lg"
+                  >
+                    <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center">
+                      <Users className="h-6 w-6 text-gray-400" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold">
+                        {pa.artist.first_name} {pa.artist.last_name}
+                      </p>
+                      <p className="text-sm text-gray-500">{pa.artist.artist_name}</p>
+                      <p className="text-sm text-gray-400">
+                        {pa.artist.city}, {pa.artist.nationality}
+                      </p>
+                    </div>
+                    {/* ✅ CORRETTO: prefisso /app/ */}
+                    <Button
+                      variant="outline"
+                      onClick={() => navigate(`/app/artists/${pa.artist.id}`)}
+                    >
+                      Visualizza
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-center py-8">
+                Nessun artista associato a questo progetto
+              </p>
+            )}
+          </Card>
+        </TabsContent>
+
+        {/* ════ Tab: Documents ════ */}
+        <TabsContent value="documents">
+          <Card className="p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Documenti del Progetto</h3>
+
+              <Dialog
+                open={isDocumentModalOpen}
+                onOpenChange={setIsDocumentModalOpen}
+              >
+                <DialogTrigger asChild>
+                  <Button>
+                    <Upload className="h-4 w-4 mr-2" />
+                    Carica Documento
+                  </Button>
+                </DialogTrigger>
+
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Carica Nuovo Documento</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <div>
+                      <Label htmlFor="document-description">
+                        Descrizione (opzionale)
+                      </Label>
+                      <Textarea
+                        id="document-description"
+                        value={documentDescription}
+                        onChange={(e) => setDocumentDescription(e.target.value)}
+                        placeholder="Es: Contratto venue, Budget dettagliato, ecc."
+                        rows={3}
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="document-file">Seleziona File</Label>
+                      <Input
+                        id="document-file"
+                        type="file"
+                        multiple
+                        onChange={handleDocumentUpload}
+                        disabled={uploadingDocument}
+                        className="cursor-pointer"
+                        accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.jpg,.jpeg,.png"
+                      />
+                      <p className="text-xs text-gray-500 mt-2">
+                        Formati supportati: PDF, Word, Excel, Immagini (max 50MB)
+                      </p>
+                    </div>
+                    {uploadingDocument && (
+                      <div className="flex items-center gap-2 text-sm text-gray-600">
+                        <span className="animate-spin rounded-full h-4 w-4 border-2 border-primary border-t-transparent" />
+                        Caricamento in corso...
+                      </div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
+
+            {documents.length > 0 ? (
+              <div className="space-y-3">
+                {documents.map((doc) => (
+                  <Card
+                    key={doc.id}
+                    className="p-4 hover:shadow-md transition-shadow"
+                  >
+                    <div className="flex items-start gap-4">
+                      <div className="flex-shrink-0">
+                        {getFileIcon(doc.file_type)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-medium text-sm truncate">
+                          {doc.file_name}
+                        </h4>
+                        {doc.description && (
+                          <p className="text-sm text-gray-600 mt-1">
+                            {doc.description}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                          <span>{formatFileSize(doc.file_size)}</span>
+                          <span>•</span>
+                          <span>
+                            {new Date(doc.created_at).toLocaleDateString('it-IT')}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => window.open(doc.file_url, '_blank')}
+                        >
+                          Apri
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            handleDeleteDocument(doc.id, doc.file_url)
+                          }
+                          className="text-red-500 hover:text-red-700"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-12">
+                <FileText className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+                <p className="text-gray-500 mb-2">Nessun documento caricato</p>
+                <p className="text-sm text-gray-400 mb-4">
+                  Carica contratti, budget, presentazioni e altri file del progetto
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() => setIsDocumentModalOpen(true)}
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  Carica Primo Documento
+                </Button>
+              </div>
+            )}
+          </Card>
+        </TabsContent>
+
+        {/* ════ Tab: Budget ════ */}
+        <TabsContent value="budget">
+          <Card className="p-6">
+            <h3 className="text-lg font-semibold mb-4">Gestione Budget</h3>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-4 bg-blue-50 rounded-lg">
+                  <p className="text-sm text-gray-600">Budget Pianificato</p>
+                  <p className="text-3xl font-bold text-blue-600">
+                    {formatCurrency(project.budget_planned || 0)}
+                  </p>
+                </div>
+                <div className="p-4 bg-green-50 rounded-lg">
+                  <p className="text-sm text-gray-600">Speso</p>
+                  <p className="text-3xl font-bold text-green-600">
+                    {formatCurrency(project.budget_actual || 0)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-600">Rimanente</p>
+                <p className="text-3xl font-bold">
+                  {formatCurrency(
+                    (project.budget_planned || 0) - (project.budget_actual || 0)
+                  )}
+                </p>
+              </div>
+
+              <div className="text-center py-8 text-gray-500">
+                <p>Breakdown budget dettagliato</p>
+                <p className="text-sm">Funzionalità in arrivo</p>
+              </div>
+            </div>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}

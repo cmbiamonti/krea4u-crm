@@ -1,0 +1,40 @@
+
+//Accedibile via: 'http://localhost:5173/reset.html'
+
+```html
+<!-- public/reset.html -->
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Reset Krea4u</title>
+</head>
+<body>
+  <h1>Reset Applicazione</h1>
+  <p>Clicca il bottone per pulire completamente la cache</p>
+  <button id="reset">RESET COMPLETO</button>
+
+  <script>
+    document.getElementById('reset').addEventListener('click', async () => {
+      // Clear everything
+      localStorage.clear()
+      sessionStorage.clear()
+      
+      const dbs = await indexedDB.databases()
+      dbs.forEach(db => indexedDB.deleteDatabase(db.name))
+      
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations()
+        regs.forEach(reg => reg.unregister())
+      }
+      
+      if ('caches' in window) {
+        const names = await caches.keys()
+        await Promise.all(names.map(name => caches.delete(name)))
+      }
+      
+      alert('Cache pulita! Chiudi e riapri il browser.')
+    })
+  </script>
+</body>
+</html>
