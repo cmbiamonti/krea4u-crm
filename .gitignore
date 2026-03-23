@@ -20,6 +20,11 @@ dist-ssr
 # Tieni solo .env.example (quello va nel repo)
 !.env.example
 
+# Video e file pesanti
+public/documents/*.mp4
+public/documents/*.mov
+public/documents/*.avi
+
 # Supabase
 .supabase/
 supabase/.temp/
